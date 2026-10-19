@@ -46,7 +46,7 @@ namespace KNN {
 		public NativeArray<float3> Points;
 
 		[NativeDisableContainerSafetyRestriction]
-		NativeArray<int> m_permutation;
+		NativeList<int> m_permutation;
 
 		[NativeDisableContainerSafetyRestriction]
 		NativeList<KdNode> m_nodes;
@@ -111,17 +111,13 @@ namespace KNN {
 			m_nodes = new NativeList<KdNode>(nodeCountEstimate, allocator);
 
 			// Dumb way to create an int* essentially..
-			m_permutation = new NativeArray<int>(points.Length, allocator, NativeArrayOptions.UninitializedMemory);
+			m_permutation = new NativeList<int>(points.Length, allocator);
 			m_rootNodeIndex = new NativeArray<int>(new[] {-1}, allocator);
 			m_buildQueue = new NativeQueue<int>(allocator);
 
 #if ENABLE_UNITY_COLLECTIONS_CHECKS
 			if (allocator <= Allocator.None) {
 				throw new ArgumentException("Allocator must be Temp, TempJob or Persistent", nameof(allocator));
-			}
-
-			if (points.Length <= 0) {
-				throw new ArgumentOutOfRangeException(nameof(points), "Input points length must be >= 0");
 			}
 
 			DisposeSentinel.Create(out m_Safety, out m_DisposeSentinel, 0, allocator);
@@ -139,6 +135,8 @@ namespace KNN {
 #endif
 
 			m_nodes.Clear();
+			// Points may be reassigned between rebuilds, so the permutation follows its length
+			m_permutation.ResizeUninitialized(Points.Length);
 
 			for (int i = 0; i < m_permutation.Length; ++i) {
 				m_permutation[i] = i;
