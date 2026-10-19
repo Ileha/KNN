@@ -4,7 +4,7 @@ using Unity.Collections;
 using Unity.Jobs;
 using Unity.Mathematics;
 using UnityEngine;
-using UnityEngine.Experimental.ParticleSystemJobs;
+using UnityEngine.ParticleSystemJobs;
 
 // Ideally you really would use something like ECS to visualize the point cloud
 // And query from a job component system
@@ -19,10 +19,10 @@ public class KnnVisualizationDemo : MonoBehaviour {
 	public QueryMode Mode;
 
 	public int ParticleCount = 20000;
-	
+
 	public int QueryK = 20;
 	public float QueryRange = 1.0f;
-	
+
 	ParticleSystem m_system;
 
 	NativeArray<float3> m_queryPositions;
@@ -32,8 +32,10 @@ public class KnnVisualizationDemo : MonoBehaviour {
 	NativeArray<int> m_results;
 
 	KnnContainer m_container;
-	
+
 	NativeArray<RangeQueryResult> m_rangeResults;
+
+	JobHandle m_particleJobHandle;
 
 	void Start() {
 		m_system = GetComponent<ParticleSystem>();
@@ -46,6 +48,7 @@ public class KnnVisualizationDemo : MonoBehaviour {
 	}
 
 	void OnDestroy() {
+		m_particleJobHandle.Complete();
 		m_points.Dispose();
 		m_container.Dispose();
 		m_results.Dispose();
@@ -58,14 +61,14 @@ public class KnnVisualizationDemo : MonoBehaviour {
 	}
 
 	// [BurstCompile(CompileSynchronously = true)]
-	struct ParticleJob : IParticleSystemJob {
+	struct ParticleJob : IJobParticleSystem {
 		[ReadOnly] public NativeArray<int> KnnResults;
 		public NativeArray<float3> Points;
 
 		public NativeArray<Color32> Colors;
 		public int K;
 
-		public void ProcessParticleSystem(ParticleSystemJobData jobData) {
+		public void Execute(ParticleSystemJobData jobData) {
 			var colors = jobData.startColors;
 			var positions = jobData.positions;
 
@@ -85,13 +88,13 @@ public class KnnVisualizationDemo : MonoBehaviour {
 		}
 	}
 
-	struct ParticleRangeJob : IParticleSystemJob {
+	struct ParticleRangeJob : IJobParticleSystem {
 		[ReadOnly] public NativeArray<RangeQueryResult> KnnResults;
 
 		public NativeArray<float3> Points;
 		public NativeArray<Color32> Colors;
 
-		public void ProcessParticleSystem(ParticleSystemJobData jobData) {
+		public void Execute(ParticleSystemJobData jobData) {
 			var partColors = jobData.startColors;
 			var partPos = jobData.positions;
 
@@ -115,29 +118,38 @@ public class KnnVisualizationDemo : MonoBehaviour {
 			}
 		}
 	}
-	
-	void Update() {
+
+	// Unity calls this when it schedules the particle update jobs, replacing the removed ParticleSystem.SetJob
+	void OnParticleUpdateJobScheduled() {
+		// Query buffers are created in the first LateUpdate
+		if (!m_queryPositions.IsCreated) {
+			return;
+		}
+
 		if (Mode == QueryMode.KNearest) {
 			// Update particles job to do the colors
-			m_system.SetJob(new ParticleJob {
+			m_particleJobHandle = new ParticleJob {
 				KnnResults = m_results,
 				Points = m_points,
 				K = QueryK,
 				Colors = m_queryColors
-			});
+			}.Schedule(m_system);
 		}
 		else {
 			// Update particles job to do the colors
-			m_system.SetJob(new ParticleRangeJob {
+			m_particleJobHandle = new ParticleRangeJob {
 				KnnResults = m_rangeResults,
 				Points = m_points,
 				Colors = m_queryColors
-			});
+			}.Schedule(m_system);
 		}
 	}
 
 	// After particle job
 	void LateUpdate() {
+		// Particle jobs run until PostLateUpdate, and they write m_points that the rebuild reads
+		m_particleJobHandle.Complete();
+
 		// Rebuild our datastructure
 		var rebuild = new KnnRebuildJob(m_container);
 		var rebuildHandle = rebuild.Schedule();
@@ -153,7 +165,7 @@ public class KnnVisualizationDemo : MonoBehaviour {
 			m_queryPositions = new NativeArray<float3>(QueryProbe.All.Count, Allocator.Persistent);
 			m_results = new NativeArray<int>(QueryK * QueryProbe.All.Count, Allocator.Persistent);
 			m_queryColors = new NativeArray<Color32>(QueryProbe.All.Count, Allocator.Persistent);
-			
+
 			// Initialize all the range query results
 			m_rangeResults = new NativeArray<RangeQueryResult>(QueryProbe.All.Count, Allocator.Persistent);
 
@@ -163,13 +175,13 @@ public class KnnVisualizationDemo : MonoBehaviour {
 				m_rangeResults[i] = new RangeQueryResult(1024, Allocator.Persistent);
 			}
 		}
-		
+
 		for (int i = 0; i < QueryProbe.All.Count; i++) {
 			var p = QueryProbe.All[i];
 			m_queryPositions[i] = p.transform.position;
 			m_queryColors[i] = p.Color;
 		}
-		
+
 		switch (Mode) {
 			case QueryMode.KNearest: {
 				// Do a KNN query
@@ -184,7 +196,7 @@ public class KnnVisualizationDemo : MonoBehaviour {
 			case QueryMode.Range: {
 				// Do a range query
 				var query = new QueryRangeBatchJob(m_container, m_queryPositions, QueryRange, m_rangeResults);
-			
+
 				// Schedule query, dependent on the rebuild
 				// We're only doing a very limited number of points - so allow each query to have it's own job
 				query.ScheduleBatch(m_queryPositions.Length, 1, rebuildHandle).Complete();
