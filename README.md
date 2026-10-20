@@ -105,6 +105,50 @@ points.Dispose();
 result.Dispose();
 ```
 
+## Batch jobs with per-query parameters
+
+`KnnBatchRadiusJob` and `KnnBatchKNearestJob` take a radius or `k` per query and write variable-length results to a `NativeStream` (one stream index per query). There is no upfront max count.
+
+```C#
+// Radius: one RadiusData per query
+var radiusInput = new NativeArray<RadiusData>(queryCount, Allocator.TempJob);
+radiusInput[0] = new RadiusData { Position = queryPosition, Radius = 2.0f };
+var radiusOutput = new NativeStream(radiusInput.Length, Allocator.TempJob);
+
+new KnnBatchRadiusJob {
+    Container = knnContainer,
+    Input = radiusInput,
+    Output = radiusOutput.AsWriter(),
+}.ScheduleBatch(radiusInput.Length, 32).Complete();
+
+// K-nearest: one KNearestData per query, nearest first.
+// k is clamped to the point count.
+var kInput = new NativeArray<KNearestData>(queryCount, Allocator.TempJob);
+kInput[0] = new KNearestData { Position = queryPosition, K = 10 };
+var kOutput = new NativeStream(kInput.Length, Allocator.TempJob);
+
+new KnnBatchKNearestJob {
+    Container = knnContainer,
+    Input = kInput,
+    Output = kOutput.AsWriter(),
+}.ScheduleBatch(kInput.Length, 32).Complete();
+
+// Read results: stream index == query index
+var reader = kOutput.AsReader();
+for (int q = 0; q < kInput.Length; ++q) {
+    int count = reader.BeginForEachIndex(q);
+    for (int i = 0; i < count; ++i) {
+        int pointIndex = reader.Read<int>();
+    }
+    reader.EndForEachIndex();
+}
+
+radiusInput.Dispose();
+radiusOutput.Dispose();
+kInput.Dispose();
+kOutput.Dispose();
+```
+
 # Demo
 
 The demo folder contains 2 demos:
