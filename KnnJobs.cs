@@ -133,6 +133,35 @@ namespace KNN.Jobs
         }
     }
 
+    // KNN has no box query: take the sphere around the box, then keep the points inside the box
+    [BurstCompile]
+    public struct QueryIntervalJob : IJob
+    {
+        [ReadOnly] public KnnContainer Container;
+        public float3 Min;
+        public float3 Max;
+        public NativeList<int> Result;
+
+        void IJob.Execute()
+        {
+            var center = (Min + Max) * 0.5f;
+            Container.QueryRange(center, math.distance(Min, Max) * 0.5f, Result);
+
+            // Keep only the points inside the box, compacting in place
+            var count = 0;
+            for (var i = 0; i < Result.Length; i++)
+            {
+                var p = Container.Points[Result[i]];
+                if (math.all(p >= Min & p <= Max))
+                {
+                    Result[count++] = Result[i];
+                }
+            }
+
+            Result.ResizeUninitialized(count);
+        }
+    }
+
 
     [BurstCompile(CompileSynchronously = true)]
     public struct QueryKNearestBatchJob : IJobParallelForBatch
