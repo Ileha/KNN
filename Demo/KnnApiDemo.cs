@@ -50,57 +50,56 @@ public static class KnnApiDemo  {
 		
 		// Or maybe we want to query neighbours for multiple points.
 		const int queryPoints = 100000;
-		
-		// Keep an array of neighbour indices of all points
-		var results = new NativeArray<int>(queryPoints * kNeighbours, Allocator.TempJob);
-		
-		// Query at a few random points
-		var queryPositions = new NativeArray<float3>(queryPoints, Allocator.TempJob);
+
+		// Query at a few random points, each with its own k
+		var kInput = new NativeArray<KNearestData>(queryPoints, Allocator.TempJob);
 		for (int i = 0; i < queryPoints; ++i) {
-			queryPositions[i] = rand.NextFloat3() * 0.1f;
-		}	
+			kInput[i] = new KNearestData { Position = rand.NextFloat3() * 0.1f, K = kNeighbours };
+		}
+
+		// One stream index per query; each holds the neighbour indices, nearest first
+		var kOutput = new NativeStream(kInput.Length, Allocator.TempJob);
 
 		Profiler.BeginSample("Batch Query");
 		// Fire up job to get results for all points
-		var batchQueryJob = new QueryKNearestBatchJob(knnContainer, queryPositions, results);
+		var batchQueryJob = new KnnBatchKNearestJob { Container = knnContainer, Input = kInput, Output = kOutput.AsWriter() };
 
 		// And just run immediately now. This will run on multiple threads!
-		batchQueryJob.ScheduleBatch(queryPositions.Length, queryPositions.Length / 32).Complete();
+		batchQueryJob.ScheduleBatch(kInput.Length, kInput.Length / 32).Complete();
 		Profiler.EndSample();
-		
+
 		// Or maybe we're interested in a range around eacht query point
 		var queryRangeResult = new NativeList<int>(Allocator.TempJob);
 		var rangeQueryJob = new QueryRangeJob(knnContainer, queryPosition, 2.0f, queryRangeResult);
-		
-		// Store a list of particles in range
-		var rangeResults = new NativeArray<RangeQueryResult>(queryPoints, Allocator.TempJob);
-		
+
 		// And just run immediately on the main thread for now. This uses Burst!
 		rangeQueryJob.Schedule().Complete();
-		
-		// Unfortunately, for batch range queries we do need to decide upfront the maximum nr. of neighbours we allow
-		// This is due to limitation on allocations within a job.
-		for (int i = 0; i < rangeResults.Length; ++i) {
-			rangeResults[i] = new RangeQueryResult(128, Allocator.TempJob);
+
+		// Batch range queries write a variable number of indices per query, so no max count is needed upfront.
+		// Keep the radius small: every point in range is written, and the points fill a unit cube
+		const float batchRadius = 0.02f;
+		var radiusInput = new NativeArray<RadiusData>(queryPoints, Allocator.TempJob);
+		for (int i = 0; i < queryPoints; ++i) {
+			radiusInput[i] = new RadiusData { Position = kInput[i].Position, Radius = batchRadius };
 		}
+
+		var radiusOutput = new NativeStream(radiusInput.Length, Allocator.TempJob);
 
 		Profiler.BeginSample("Batch Range Query");
 		// Fire up job to get results for all points
-		var batchRange = new QueryRangeBatchJob(knnContainer, queryPositions, 2.0f, rangeResults);
+		var batchRange = new KnnBatchRadiusJob { Container = knnContainer, Input = radiusInput, Output = radiusOutput.AsWriter() };
 
 		// And just run immediately now. This will run on multiple threads!
-		batchRange.ScheduleBatch(queryPositions.Length, queryPositions.Length / 32).Complete();
+		batchRange.ScheduleBatch(radiusInput.Length, radiusInput.Length / 32).Complete();
 		Profiler.EndSample();
-		
-		// Now the results array contains all the neighbours!
+
+		// Now the output streams contain all the neighbours!
 		queryRangeResult.Dispose();
-		foreach (var r in rangeResults) {
-			r.Dispose();
-		}
-		rangeResults.Dispose();
+		radiusInput.Dispose();
+		radiusOutput.Dispose();
 		knnContainer.Dispose();
-		queryPositions.Dispose();
-		results.Dispose();
+		kInput.Dispose();
+		kOutput.Dispose();
 		points.Dispose();
 		result.Dispose();
 		Profiler.EndSample();

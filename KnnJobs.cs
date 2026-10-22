@@ -1,11 +1,7 @@
-﻿using System;
-using Unity.Burst;
+﻿using Unity.Burst;
 using Unity.Collections;
-using Unity.Collections.LowLevel.Unsafe;
 using Unity.Jobs;
 using Unity.Mathematics;
-using UnityEngine;
-using UnsafeUtilityEx = KNN.Internal.UnsafeUtilityEx;
 
 namespace KNN.Jobs
 {
@@ -19,6 +15,12 @@ namespace KNN.Jobs
     {
         public float3 Position;
         public int K;
+    }
+
+    public struct IntervalData
+    {
+        public float3 Min;
+        public float3 Max;
     }
 
     // Top-level and non-generic so Burst can compile them ahead of time in player builds
@@ -53,6 +55,36 @@ namespace KNN.Jobs
     }
 
     [BurstCompile]
+    public struct KnnBatchIntervalJob : IJobParallelForBatch
+    {
+        [ReadOnly] public KnnContainer Container;
+        [ReadOnly] public NativeArray<IntervalData> Input;
+        public NativeStream.Writer Output;
+
+        public void Execute(int startIndex, int count)
+        {
+            // One buffer per batch; it keeps its grown capacity across requests
+            var hits = new NativeList<int>(Allocator.Temp);
+            for (var index = startIndex; index < startIndex + count; index++)
+            {
+                var request = Input[index];
+                hits.Clear();
+                Container.QueryInterval(request.Min, request.Max, hits);
+
+                Output.BeginForEachIndex(index);
+                for (var i = 0; i < hits.Length; i++)
+                {
+                    Output.Write(hits[i]);
+                }
+
+                Output.EndForEachIndex();
+            }
+
+            hits.Dispose();
+        }
+    }
+
+    [BurstCompile]
     public struct KnnBatchKNearestJob : IJobParallelForBatch
     {
         [ReadOnly] public KnnContainer Container;
@@ -61,19 +93,20 @@ namespace KNN.Jobs
 
         public void Execute(int startIndex, int count)
         {
-            // One buffer per batch, resized per request
+            // One buffer and one query temp per batch, resized per request
             var result = new NativeList<int>(Allocator.Temp);
+            var temp = KnnContainer.KnnQueryTemp.Create(1);
             for (var index = startIndex; index < startIndex + count; index++)
             {
                 var request = Input[index];
-                // KNN reads past its heap when k exceeds the point count
+                // Clamped, so the result has no -1 slots for missing points
                 var k = math.min(request.K, Container.Points.Length);
 
                 Output.BeginForEachIndex(index);
                 if (k > 0)
                 {
                     result.ResizeUninitialized(k);
-                    Container.QueryKNearest(request.Position, result.AsArray());
+                    Container.QueryKNearest(request.Position, result.AsArray(), ref temp);
 
                     // KNN returns the farthest first
                     for (var i = k - 1; i >= 0; i--)
@@ -85,6 +118,7 @@ namespace KNN.Jobs
                 Output.EndForEachIndex();
             }
 
+            temp.Dispose();
             result.Dispose();
         }
     }
@@ -133,7 +167,6 @@ namespace KNN.Jobs
         }
     }
 
-    // KNN has no box query: take the sphere around the box, then keep the points inside the box
     [BurstCompile]
     public struct QueryIntervalJob : IJob
     {
@@ -144,141 +177,7 @@ namespace KNN.Jobs
 
         void IJob.Execute()
         {
-            var center = (Min + Max) * 0.5f;
-            Container.QueryRange(center, math.distance(Min, Max) * 0.5f, Result);
-
-            // Keep only the points inside the box, compacting in place
-            var count = 0;
-            for (var i = 0; i < Result.Length; i++)
-            {
-                var p = Container.Points[Result[i]];
-                if (math.all(p >= Min & p <= Max))
-                {
-                    Result[count++] = Result[i];
-                }
-            }
-
-            Result.ResizeUninitialized(count);
-        }
-    }
-
-
-    [BurstCompile(CompileSynchronously = true)]
-    public struct QueryKNearestBatchJob : IJobParallelForBatch
-    {
-        [ReadOnly] private KnnContainer m_container;
-        [ReadOnly] private NativeSlice<float3> m_queryPositions;
-
-        // Unity really doesn't like it when we write to the same underlying array
-        // Even if slices don't overlap... So we're just being dangerous here
-        [NativeDisableParallelForRestriction] [NativeDisableContainerSafetyRestriction]
-        private readonly NativeSlice<int> m_results;
-
-        private readonly int m_k;
-
-        public QueryKNearestBatchJob(KnnContainer container, NativeArray<float3> queryPositions,
-            NativeSlice<int> results)
-        {
-            m_container = container;
-            m_queryPositions = queryPositions;
-            m_results = results;
-
-#if ENABLE_UNITY_COLLECTIONS_CHECKS
-            if (queryPositions.Length == 0 || results.Length % queryPositions.Length != 0)
-            {
-                Debug.LogError("Make sure your results array is a multiple in length of your querypositions array!");
-            }
-#endif
-
-            m_k = results.Length / queryPositions.Length;
-        }
-
-        public void Execute(int startIndex, int count)
-        {
-            // Write results to proper slice!
-            for (var index = startIndex; index < startIndex + count; ++index)
-            {
-                var resultsSlice = m_results.Slice(index * m_k, m_k);
-                m_container.QueryKNearest(m_queryPositions[index], resultsSlice);
-            }
-        }
-    }
-
-    public unsafe struct RangeQueryResult
-    {
-        public int Length;
-
-        private readonly int* m_indices;
-        private readonly int m_capacity;
-
-        private readonly Allocator m_allocator;
-
-        public int this[int index]
-        {
-            get
-            {
-                if (index >= m_capacity)
-                {
-                    throw new IndexOutOfRangeException();
-                }
-
-                return UnsafeUtility.ReadArrayElement<int>(m_indices, index);
-            }
-        }
-
-        public RangeQueryResult(int maxCount, Allocator allocator)
-        {
-            m_capacity = maxCount;
-            m_indices = UnsafeUtilityEx.AllocArray<int>(m_capacity, allocator);
-            Length = 0;
-            m_allocator = allocator;
-        }
-
-        public void SetResults(NativeList<int> result)
-        {
-            UnsafeUtility.MemCpy(m_indices, result.GetUnsafePtr(), Mathf.Min(m_capacity, result.Length) * sizeof(int));
-            Length = Mathf.Min(m_capacity, result.Length);
-        }
-
-        public void Dispose()
-        {
-            UnsafeUtility.Free(m_indices, m_allocator);
-        }
-    }
-
-
-    [BurstCompile(CompileSynchronously = true)]
-    public struct QueryRangeBatchJob : IJobParallelForBatch
-    {
-        [ReadOnly] private KnnContainer m_container;
-        [ReadOnly] private NativeSlice<float3> m_queryPositions;
-
-        private readonly float m_range;
-
-        public NativeArray<RangeQueryResult> Results;
-
-        public QueryRangeBatchJob(KnnContainer container, NativeArray<float3> queryPositions, float range,
-            NativeArray<RangeQueryResult> results)
-        {
-            m_container = container;
-            m_queryPositions = queryPositions;
-            m_range = range;
-            Results = results;
-        }
-
-        public void Execute(int startIndex, int count)
-        {
-            // Write results to proper slice!
-            for (var index = startIndex; index < startIndex + count; ++index)
-            {
-                var tempList = new NativeList<int>(Allocator.Temp);
-                m_container.QueryRange(m_queryPositions[index], m_range, tempList);
-
-                var result = Results[index];
-                result.SetResults(tempList);
-
-                Results[index] = result;
-            }
+            Container.QueryInterval(Min, Max, Result);
         }
     }
 

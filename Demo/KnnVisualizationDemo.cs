@@ -25,15 +25,16 @@ public class KnnVisualizationDemo : MonoBehaviour {
 
 	ParticleSystem m_system;
 
-	NativeArray<float3> m_queryPositions;
+	NativeArray<KNearestData> m_kNearestInput;
+	NativeArray<RadiusData> m_radiusInput;
 	NativeArray<Color32> m_queryColors;
 
 	NativeArray<float3> m_points;
-	NativeArray<int> m_results;
+
+	// One stream index per probe, holding the indices of its neighbours
+	NativeStream m_results;
 
 	KnnContainer m_container;
-
-	NativeArray<RangeQueryResult> m_rangeResults;
 
 	JobHandle m_particleJobHandle;
 
@@ -51,22 +52,21 @@ public class KnnVisualizationDemo : MonoBehaviour {
 		m_particleJobHandle.Complete();
 		m_points.Dispose();
 		m_container.Dispose();
-		m_results.Dispose();
-		foreach (var result in m_rangeResults) {
-			result.Dispose();
+		DisposeResults();
+
+		// Query buffers are created in the first LateUpdate
+		if (m_queryColors.IsCreated) {
+			m_kNearestInput.Dispose();
+			m_radiusInput.Dispose();
+			m_queryColors.Dispose();
 		}
-		m_rangeResults.Dispose();
-		m_queryPositions.Dispose();
-		m_queryColors.Dispose();
 	}
 
-	// [BurstCompile(CompileSynchronously = true)]
+	// Both query modes write one stream index per probe, so one job colors them
 	struct ParticleJob : IJobParticleSystem {
-		[ReadOnly] public NativeArray<int> KnnResults;
+		[ReadOnly] public NativeStream.Reader KnnResults;
 		public NativeArray<float3> Points;
-
 		public NativeArray<Color32> Colors;
-		public int K;
 
 		public void Execute(ParticleSystemJobData jobData) {
 			var colors = jobData.startColors;
@@ -82,67 +82,30 @@ public class KnnVisualizationDemo : MonoBehaviour {
 			}
 
 			// Set all neighbours to result color
-			for (int i = 0; i < KnnResults.Length; i++) {
-				colors[KnnResults[i]] = Colors[i / K];
-			}
-		}
-	}
-
-	struct ParticleRangeJob : IJobParticleSystem {
-		[ReadOnly] public NativeArray<RangeQueryResult> KnnResults;
-
-		public NativeArray<float3> Points;
-		public NativeArray<Color32> Colors;
-
-		public void Execute(ParticleSystemJobData jobData) {
-			var partColors = jobData.startColors;
-			var partPos = jobData.positions;
-
-			for (int i = 0; i < jobData.count; ++i) {
-				Points[i] = new float3(partPos.x[i], partPos.y[i], partPos.z[i]);
-			}
-
-			// Set every particle to white first
-			for (int i = 0; i < jobData.count; i++) {
-				partColors[i] = new Color32(0, 0, 0, 255);
-			}
-
-			// Set all neighbours to result color
-			for (int i = 0; i < KnnResults.Length; i++) {
-				var results = KnnResults[i];
-				var setColor = Colors[i];
-
-				for (int j = 0; j < results.Length; ++j) {
-					partColors[results[j]] = setColor;
+			for (int i = 0; i < Colors.Length; i++) {
+				int count = KnnResults.BeginForEachIndex(i);
+				for (int j = 0; j < count; j++) {
+					colors[KnnResults.Read<int>()] = Colors[i];
 				}
+
+				KnnResults.EndForEachIndex();
 			}
 		}
 	}
 
 	// Unity calls this when it schedules the particle update jobs, replacing the removed ParticleSystem.SetJob
 	void OnParticleUpdateJobScheduled() {
-		// Query buffers are created in the first LateUpdate
-		if (!m_queryPositions.IsCreated) {
+		// Query results are created in the first LateUpdate
+		if (!m_results.IsCreated) {
 			return;
 		}
 
-		if (Mode == QueryMode.KNearest) {
-			// Update particles job to do the colors
-			m_particleJobHandle = new ParticleJob {
-				KnnResults = m_results,
-				Points = m_points,
-				K = QueryK,
-				Colors = m_queryColors
-			}.Schedule(m_system);
-		}
-		else {
-			// Update particles job to do the colors
-			m_particleJobHandle = new ParticleRangeJob {
-				KnnResults = m_rangeResults,
-				Points = m_points,
-				Colors = m_queryColors
-			}.Schedule(m_system);
-		}
+		// Update particles job to do the colors
+		m_particleJobHandle = new ParticleJob {
+			KnnResults = m_results.AsReader(),
+			Points = m_points,
+			Colors = m_queryColors
+		}.Schedule(m_system);
 	}
 
 	// After particle job
@@ -155,53 +118,50 @@ public class KnnVisualizationDemo : MonoBehaviour {
 		var rebuildHandle = rebuild.Schedule();
 
 		// Get all probe positions / colors
-		if (!m_queryPositions.IsCreated || m_queryPositions.Length != QueryProbe.All.Count) {
-			if (m_queryPositions.IsCreated) {
-				m_queryPositions.Dispose();
-				m_results.Dispose();
+		if (!m_queryColors.IsCreated || m_queryColors.Length != QueryProbe.All.Count) {
+			if (m_queryColors.IsCreated) {
+				m_kNearestInput.Dispose();
+				m_radiusInput.Dispose();
 				m_queryColors.Dispose();
 			}
 
-			m_queryPositions = new NativeArray<float3>(QueryProbe.All.Count, Allocator.Persistent);
-			m_results = new NativeArray<int>(QueryK * QueryProbe.All.Count, Allocator.Persistent);
+			m_kNearestInput = new NativeArray<KNearestData>(QueryProbe.All.Count, Allocator.Persistent);
+			m_radiusInput = new NativeArray<RadiusData>(QueryProbe.All.Count, Allocator.Persistent);
 			m_queryColors = new NativeArray<Color32>(QueryProbe.All.Count, Allocator.Persistent);
-
-			// Initialize all the range query results
-			m_rangeResults = new NativeArray<RangeQueryResult>(QueryProbe.All.Count, Allocator.Persistent);
-
-			// Each range query result object needs to declare upfront what the maximum number of points in range is
-			for (int i = 0; i < m_rangeResults.Length; ++i) {
-				// Allow for a maximum of 1024 results
-				m_rangeResults[i] = new RangeQueryResult(1024, Allocator.Persistent);
-			}
 		}
 
 		for (int i = 0; i < QueryProbe.All.Count; i++) {
 			var p = QueryProbe.All[i];
-			m_queryPositions[i] = p.transform.position;
+			m_kNearestInput[i] = new KNearestData { Position = p.transform.position, K = QueryK };
+			m_radiusInput[i] = new RadiusData { Position = p.transform.position, Radius = QueryRange };
 			m_queryColors[i] = p.Color;
 		}
 
+		// A stream cannot be cleared, so each frame writes a new one
+		DisposeResults();
+		m_results = new NativeStream(QueryProbe.All.Count, Allocator.Persistent);
+
+		// We're only doing a very limited number of points - so allow each query to have it's own job
 		switch (Mode) {
 			case QueryMode.KNearest: {
-				// Do a KNN query
-				var query = new QueryKNearestBatchJob(m_container, m_queryPositions, m_results);
-
-				// Schedule query, dependent on the rebuild
-				// We're only doing a very limited number of points - so allow each query to have it's own job
-				query.ScheduleBatch(m_queryPositions.Length, 1, rebuildHandle).Complete();
+				// Do a KNN query, dependent on the rebuild
+				var query = new KnnBatchKNearestJob { Container = m_container, Input = m_kNearestInput, Output = m_results.AsWriter() };
+				query.ScheduleBatch(m_kNearestInput.Length, 1, rebuildHandle).Complete();
 				break;
 			}
 
 			case QueryMode.Range: {
-				// Do a range query
-				var query = new QueryRangeBatchJob(m_container, m_queryPositions, QueryRange, m_rangeResults);
-
-				// Schedule query, dependent on the rebuild
-				// We're only doing a very limited number of points - so allow each query to have it's own job
-				query.ScheduleBatch(m_queryPositions.Length, 1, rebuildHandle).Complete();
+				// Do a range query, dependent on the rebuild
+				var query = new KnnBatchRadiusJob { Container = m_container, Input = m_radiusInput, Output = m_results.AsWriter() };
+				query.ScheduleBatch(m_radiusInput.Length, 1, rebuildHandle).Complete();
 				break;
 			}
+		}
+	}
+
+	void DisposeResults() {
+		if (m_results.IsCreated) {
+			m_results.Dispose();
 		}
 	}
 }

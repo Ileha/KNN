@@ -70,6 +70,9 @@ namespace KNN {
 
 		const int c_maxPointsPerLeafNode = 64;
 
+		// A depth-first query keeps at most one node per tree level waiting, so this rarely grows
+		const int c_queryStackCapacity = 64;
+
 		public struct KnnQueryTemp : IDisposable {
 			public MinMaxHeap<int> MaxHeap;
 			public MinMaxHeap<QueryNode> MinHeap;
@@ -78,23 +81,35 @@ namespace KNN {
 				KnnQueryTemp temp;
 				temp.MaxHeap = new MinMaxHeap<int>(kCapacity, Allocator.Temp);
 				
-				// Min heap keeps track of current stack.
-				// The max stack depth is the tree depth
-				// The tree depth is log_c(nodes)
-				// Let's assume people have a tree at most 32 deep (which equals 2^32 * c_maxPointsPerLeafNode ~ 2^39 nodes)
-				// There are left/right nodes -> 64 max on stack at any given time
+				// Min heap keeps the nodes still to visit. A wide range query can have hundreds of them,
+				// so PushQueryNode grows it: a full min heap would overwrite its closest node
 				temp.MinHeap = new MinMaxHeap<QueryNode>(64, Allocator.Temp);
 				return temp;
 			}
 
 			public void PushQueryNode(int index, float3 closestPoint, float3 queryPosition) {
 				float lengthsq = math.lengthsq(closestPoint - queryPosition);
-				
+
+				if (MinHeap.IsFull) {
+					MinHeap.Resize(MinHeap.Count * 2);
+				}
+
 				MinHeap.PushObjMin(new QueryNode {
 					NodeIndex = index,
 					TempClosestPoint = closestPoint,
 					Distance = lengthsq
 				}, lengthsq);
+			}
+
+			// Ported from bryding/KNN: one temp serves many queries, so a batch allocates once.
+			// The max heap capacity is the k it keeps, so it resizes only when k changes
+			public void Clear(int kCapacity) {
+				if (MaxHeap.Capacity != kCapacity) {
+					MaxHeap.Resize(kCapacity);
+				}
+
+				MaxHeap.Clear();
+				MinHeap.Clear();
 			}
 
 			public void Dispose() {
@@ -112,7 +127,9 @@ namespace KNN {
 
 			// Dumb way to create an int* essentially..
 			m_permutation = new NativeList<int>(points.Length, allocator);
-			m_rootNodeIndex = new NativeArray<int>(new[] {-1}, allocator);
+			// Set after allocation: a managed array initializer would allocate garbage
+			m_rootNodeIndex = new NativeArray<int>(1, allocator);
+			m_rootNodeIndex[0] = -1;
 			m_buildQueue = new NativeQueue<int>(allocator);
 
 #if ENABLE_UNITY_COLLECTIONS_CHECKS
@@ -149,16 +166,31 @@ namespace KNN {
 
 			while (m_buildQueue.Count > 0) {
 				int index = m_buildQueue.Dequeue();
-				SplitNode(index, out int posNodeIndex, out int negNodeIndex);
 
-				if (m_nodes[negNodeIndex].Count > c_maxPointsPerLeafNode) {
-					m_buildQueue.Enqueue(posNodeIndex);
+				if (!SplitNode(index, out int posNodeIndex, out int negNodeIndex)) {
+					// SplitNode flattened an axis where all points are equal, so try the node again on another axis
+					if (ShouldSplit(index)) {
+						m_buildQueue.Enqueue(index);
+					}
+
+					continue;
 				}
 
-				if (m_nodes[posNodeIndex].Count > c_maxPointsPerLeafNode) {
+				if (ShouldSplit(negNodeIndex)) {
 					m_buildQueue.Enqueue(negNodeIndex);
 				}
+
+				if (ShouldSplit(posNodeIndex)) {
+					m_buildQueue.Enqueue(posNodeIndex);
+				}
 			}
+		}
+
+		bool ShouldSplit(int nodeIndex) {
+			KdNode node = m_nodes[nodeIndex];
+
+			// Zero size bounds hold identical points, which no split can separate
+			return node.Count > c_maxPointsPerLeafNode && math.any(node.Bounds.Size > 0f);
 		}
 
 		public void Dispose() {
@@ -300,11 +332,11 @@ namespace KNN {
 			return b;
 		}
 
-		// TODO: When multiple points overlap exactly this function breaks.
 		/// <summary>
 		/// Recursive splitting procedure
 		/// </summary>
-		void SplitNode(int parentIndex, out int posNodeIndex, out int negNodeIndex) {
+		/// <returns>False when all points are equal on the split axis: the node keeps no children and its bounds get that axis flattened</returns>
+		bool SplitNode(int parentIndex, out int posNodeIndex, out int negNodeIndex) {
 			KdNode parent = m_nodes[parentIndex];
 
 			// center of bounding box
@@ -334,6 +366,25 @@ namespace KNN {
 			// 'Spiting' array to two sub arrays
 			int splittingIndex = Partition(parent.Start, parent.End, splitPivot, splitAxis);
 
+			// Ported from scipy cKDTree build: with no point below the pivot, the pivot is the smallest value.
+			// Move it just above that value, so the points equal to it go to the negative side
+			if (splittingIndex == parent.Start) {
+				splitPivot = NextFloatUp(splitPivot);
+				splittingIndex = Partition(parent.Start, parent.End, splitPivot, splitAxis);
+			}
+
+			// scipy: "All children are equal in this dimension, try again with new bounds"
+			if (splittingIndex == parent.End) {
+				float fixedValue = Points[m_permutation[parent.Start]][splitAxis];
+				parent.Bounds.Min[splitAxis] = fixedValue;
+				parent.Bounds.Max[splitAxis] = fixedValue;
+				m_nodes[parentIndex] = parent;
+
+				posNodeIndex = -1;
+				negNodeIndex = -1;
+				return false;
+			}
+
 			// Negative / Left node
 			float3 negMax = parentBounds.Max;
 			negMax[splitAxis] = splitPivot;
@@ -358,6 +409,17 @@ namespace KNN {
 
 			// Write back node to array to update those values
 			m_nodes[parentIndex] = parent;
+			return true;
+		}
+
+		// std::nextafter(value, +inf) for finite values
+		static float NextFloatUp(float value) {
+			if (value == 0f) {
+				return float.Epsilon;
+			}
+
+			int bits = math.asint(value);
+			return math.asfloat(value > 0f ? bits + 1 : bits - 1);
 		}
 
 		/// <summary>
@@ -463,88 +525,149 @@ namespace KNN {
 			AtomicSafetyHandle.CheckReadAndThrow(m_Safety);
 #endif
 
-			// Start with a temp of some size. This will be resized dynamically
-			var temp = KnnQueryTemp.Create(32);
-			
-			// Biggest Smallest Squared Radius
-			float bssr = radius * radius;
-			float3 rootClosestPoint = RootNode.Bounds.ClosestPoint(queryPosition);
-			
-			temp.PushQueryNode(m_rootNodeIndex[0], rootClosestPoint, queryPosition);
-			
-			while (temp.MinHeap.Count > 0) {
-				QueryNode queryNode = temp.MinHeap.PopObjMin();
+			// Ported from viliwonka KDQuery.Radius. A range query visits every node in range, so the order does not
+			// matter: a stack replaces the min heap, and hits are added unsorted like in viliwonka and scipy
+			var stack = new NativeList<QueryNode>(c_queryStackCapacity, Allocator.Temp);
+			float squaredRadius = radius * radius;
 
-				if (queryNode.Distance > bssr) {
+			stack.Add(new QueryNode {
+				NodeIndex = m_rootNodeIndex[0],
+				TempClosestPoint = RootNode.Bounds.ClosestPoint(queryPosition)
+			});
+
+			while (stack.Length > 0) {
+				QueryNode queryNode = stack[stack.Length - 1];
+				stack.RemoveAt(stack.Length - 1);
+				KdNode node = m_nodes[queryNode.NodeIndex];
+
+				// Ported from scipy traverse_no_checking: the farthest bounds corner is in range, so is every point
+				float3 farthestOffset = math.max(math.abs(node.Bounds.Min - queryPosition), math.abs(node.Bounds.Max - queryPosition));
+
+				if (math.lengthsq(farthestOffset) <= squaredRadius) {
+					result.AddRange(m_permutation.AsArray().GetSubArray(node.Start, node.Count));
 					continue;
 				}
 
-				KdNode node = m_nodes[queryNode.NodeIndex];
-
-				if (!node.Leaf) {
-					int partitionAxis = node.PartitionAxis;
-					float partitionCoord = node.PartitionCoordinate;
-					float3 tempClosestPoint = queryNode.TempClosestPoint;
-
-					if (tempClosestPoint[partitionAxis] - partitionCoord < 0) {
-						// we already know we are on the side of negative bound/node,
-						// so we don't need to test for distance
-						// push to stack for later querying
-						temp.PushQueryNode(node.NegativeChildIndex, tempClosestPoint, queryPosition);
-
-						// project the tempClosestPoint to other bound
-						tempClosestPoint[partitionAxis] = partitionCoord;
-
-						if (node.Count != 0) {
-							temp.PushQueryNode(node.PositiveChildIndex, tempClosestPoint, queryPosition);
-						}
-					}
-					else {
-						// we already know we are on the side of positive bound/node,
-						// so we don't need to test for distance
-						// push to stack for later querying
-						temp.PushQueryNode(node.PositiveChildIndex, tempClosestPoint, queryPosition);
-
-						// project the tempClosestPoint to other bound
-						tempClosestPoint[partitionAxis] = partitionCoord;
-
-						if (node.Count != 0) {
-							temp.PushQueryNode(node.NegativeChildIndex, tempClosestPoint, queryPosition);
-						}
-					}
-				} else {
+				if (node.Leaf) {
 					for (int i = node.Start; i < node.End; i++) {
 						int index = m_permutation[i];
-						float sqrDist = math.lengthsq(Points[index] - queryPosition);
 
-						if (sqrDist <= bssr) {
-							// Unlike the k-query we want to keep _all_ objects in range
-							// So resize the heap when pushing this node
-							if (temp.MaxHeap.IsFull) {
-								temp.MaxHeap.Resize(temp.MaxHeap.Count * 2);
-							}
-	
-							temp.MaxHeap.PushObjMax(index, sqrDist);
+						if (math.lengthsq(Points[index] - queryPosition) <= squaredRadius) {
+							result.Add(index);
 						}
+					}
+
+					continue;
+				}
+
+				int partitionAxis = node.PartitionAxis;
+				float partitionCoord = node.PartitionCoordinate;
+				float3 tempClosestPoint = queryNode.TempClosestPoint;
+
+				// tempClosestPoint is inside the near child, so it needs no distance test
+				bool negativeIsNear = tempClosestPoint[partitionAxis] - partitionCoord < 0;
+				int nearChild = negativeIsNear ? node.NegativeChildIndex : node.PositiveChildIndex;
+				int farChild = negativeIsNear ? node.PositiveChildIndex : node.NegativeChildIndex;
+
+				stack.Add(new QueryNode { NodeIndex = nearChild, TempClosestPoint = tempClosestPoint });
+
+				// project the tempClosestPoint to the other side, and test that side
+				tempClosestPoint[partitionAxis] = partitionCoord;
+
+				if (math.lengthsq(tempClosestPoint - queryPosition) <= squaredRadius) {
+					stack.Add(new QueryNode { NodeIndex = farChild, TempClosestPoint = tempClosestPoint });
+				}
+			}
+
+			stack.Dispose();
+		}
+
+		public void QueryInterval(float3 min, float3 max, NativeList<int> result) {
+#if ENABLE_UNITY_COLLECTIONS_CHECKS
+			AtomicSafetyHandle.CheckReadAndThrow(m_Safety);
+#endif
+
+			// Ported from viliwonka KDQuery.Interval, with a stack like QueryRange
+			var stack = new NativeList<QueryNode>(c_queryStackCapacity, Allocator.Temp);
+
+			stack.Add(new QueryNode {
+				NodeIndex = m_rootNodeIndex[0],
+				TempClosestPoint = RootNode.Bounds.ClosestPoint((min + max) / 2)
+			});
+
+			while (stack.Length > 0) {
+				QueryNode queryNode = stack[stack.Length - 1];
+				stack.RemoveAt(stack.Length - 1);
+				KdNode node = m_nodes[queryNode.NodeIndex];
+
+				// viliwonka tests leaf bounds inside the interval; any node works, as its points are contiguous
+				if (math.all(node.Bounds.Min >= min & node.Bounds.Max <= max)) {
+					result.AddRange(m_permutation.AsArray().GetSubArray(node.Start, node.Count));
+					continue;
+				}
+
+				if (node.Leaf) {
+					for (int i = node.Start; i < node.End; i++) {
+						int index = m_permutation[i];
+						float3 point = Points[index];
+
+						if (math.all(point >= min & point <= max)) {
+							result.Add(index);
+						}
+					}
+
+					continue;
+				}
+
+				int partitionAxis = node.PartitionAxis;
+				float partitionCoord = node.PartitionCoordinate;
+				float3 tempClosestPoint = queryNode.TempClosestPoint;
+
+				if (tempClosestPoint[partitionAxis] - partitionCoord < 0) {
+					stack.Add(new QueryNode { NodeIndex = node.NegativeChildIndex, TempClosestPoint = tempClosestPoint });
+					tempClosestPoint[partitionAxis] = partitionCoord;
+
+					// testing other side
+					if (tempClosestPoint[partitionAxis] <= max[partitionAxis]) {
+						stack.Add(new QueryNode { NodeIndex = node.PositiveChildIndex, TempClosestPoint = tempClosestPoint });
+					}
+				} else {
+					stack.Add(new QueryNode { NodeIndex = node.PositiveChildIndex, TempClosestPoint = tempClosestPoint });
+					tempClosestPoint[partitionAxis] = partitionCoord;
+
+					// testing other side
+					if (tempClosestPoint[partitionAxis] >= min[partitionAxis]) {
+						stack.Add(new QueryNode { NodeIndex = node.NegativeChildIndex, TempClosestPoint = tempClosestPoint });
 					}
 				}
 			}
 
-			while (temp.MaxHeap.Count > 0) {
-				result.Add(temp.MaxHeap.PopObjMax());
-			}
-
-			temp.Dispose();
+			stack.Dispose();
 		}
 
 		public void QueryKNearest(float3 queryPosition, NativeSlice<int> result) {
+			var temp = KnnQueryTemp.Create(result.Length);
+			QueryKNearest(queryPosition, result, ref temp);
+			temp.Dispose();
+		}
+
+		/// <summary>
+		/// Same as the overload above, but uses the given temp instead of allocating one, for query loops
+		/// </summary>
+		public void QueryKNearest(float3 queryPosition, NativeSlice<int> result, ref KnnQueryTemp temp) {
 #if ENABLE_UNITY_COLLECTIONS_CHECKS
 			AtomicSafetyHandle.CheckReadAndThrow(m_Safety);
 #endif
-			
-			var temp = KnnQueryTemp.Create(result.Length);
+
 			int k = result.Length;
-			
+
+			// A max heap of capacity 0 reads past its memory on the first push
+			if (k == 0) {
+				return;
+			}
+
+			temp.Clear(k);
+
 			// Biggest Smallest Squared Radius
 			float bssr = float.PositiveInfinity;
 			float3 rootClosestPoint = RootNode.Bounds.ClosestPoint(queryPosition);
@@ -606,11 +729,12 @@ namespace KNN {
 				}
 			}
 			
+			// Ported from bryding/KNN: with fewer points than k, the remaining slots get -1
+			int found = temp.MaxHeap.Count;
+
 			for (int i = 0; i < k; i++) {
-				result[i] = temp.MaxHeap.PopObjMax();
+				result[i] = i < found ? temp.MaxHeap.PopObjMax() : -1;
 			}
-			
-			temp.Dispose();
 		}
 	}
 }
