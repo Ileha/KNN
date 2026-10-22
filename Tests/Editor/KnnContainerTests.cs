@@ -67,16 +67,16 @@ namespace KNN.Tests
 
         // codeandcats/KdTree TestRadialSearch
         [Test]
-        public void QueryRange_Cities_ReturnsCitiesInRadiusInOrder()
+        public void QueryRange_Cities_ReturnsCitiesInRadius()
         {
             Build(Cities.Select(c => c.Position).ToArray());
 
             for (var radius = 1; radius < 100; radius *= 2)
             {
-                var expected = Cities.Where(c => c.Distance <= radius).OrderBy(c => c.Distance).Select(c => c.Name).ToArray();
+                var expected = Cities.Where(c => c.Distance <= radius).Select(c => c.Name).ToArray();
                 var actual = QueryRange(Cities[0].Position, radius).Select(i => Cities[i].Name).ToArray();
 
-                CollectionAssert.AreEqual(expected, actual, $"radius {radius}");
+                CollectionAssert.AreEquivalent(expected, actual, $"radius {radius}");
             }
         }
 
@@ -129,6 +129,34 @@ namespace KNN.Tests
                 CollectionAssert.AreEquivalent(expected, result.AsArray().ToArray());
             }
 
+            result.Dispose();
+        }
+
+        // no source: the old interval query searched the sphere around the box, which can miss corners on rounding
+        [Test]
+        public void QueryInterval_IntegerGrid_IncludesPointsOnFacesAndCorners()
+        {
+            const int size = 6;
+            var points = new List<float3>();
+            for (var x = 0; x < size; x++)
+            {
+                for (var y = 0; y < size; y++)
+                {
+                    for (var z = 0; z < size; z++)
+                    {
+                        points.Add(new float3(x, y, z));
+                    }
+                }
+            }
+
+            Build(points.ToArray());
+            var min = new float3(1f);
+            var max = new float3(3f);
+            var result = new NativeList<int>(Allocator.TempJob);
+            new QueryIntervalJob { Container = _knn, Min = min, Max = max, Result = result }.Run();
+
+            var expected = Enumerable.Range(0, points.Count).Where(i => math.all(points[i] >= min & points[i] <= max)).ToArray();
+            CollectionAssert.AreEquivalent(expected, result.AsArray().ToArray());
             result.Dispose();
         }
 
@@ -434,12 +462,12 @@ namespace KNN.Tests
             return indices;
         }
 
-        // Nearest first
+        // Unsorted
         private int[] QueryRange(float3 query, float radius)
         {
             var result = new NativeList<int>(Allocator.Temp);
             _knn.QueryRange(query, radius, result);
-            var indices = result.AsArray().Reverse().ToArray();
+            var indices = result.AsArray().ToArray();
             result.Dispose();
             return indices;
         }
