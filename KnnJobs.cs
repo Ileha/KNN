@@ -93,19 +93,20 @@ namespace KNN.Jobs
 
         public void Execute(int startIndex, int count)
         {
-            // One buffer per batch, resized per request
+            // One buffer and one query temp per batch, resized per request
             var result = new NativeList<int>(Allocator.Temp);
+            var temp = KnnContainer.KnnQueryTemp.Create(1);
             for (var index = startIndex; index < startIndex + count; index++)
             {
                 var request = Input[index];
-                // KNN reads past its heap when k exceeds the point count
+                // Clamped, so the result has no -1 slots for missing points
                 var k = math.min(request.K, Container.Points.Length);
 
                 Output.BeginForEachIndex(index);
                 if (k > 0)
                 {
                     result.ResizeUninitialized(k);
-                    Container.QueryKNearest(request.Position, result.AsArray());
+                    Container.QueryKNearest(request.Position, result.AsArray(), ref temp);
 
                     // KNN returns the farthest first
                     for (var i = k - 1; i >= 0; i--)
@@ -117,6 +118,7 @@ namespace KNN.Jobs
                 Output.EndForEachIndex();
             }
 
+            temp.Dispose();
             result.Dispose();
         }
     }

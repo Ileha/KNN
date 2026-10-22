@@ -101,6 +101,17 @@ namespace KNN {
 				}, lengthsq);
 			}
 
+			// Ported from bryding/KNN: one temp serves many queries, so a batch allocates once.
+			// The max heap capacity is the k it keeps, so it resizes only when k changes
+			public void Clear(int kCapacity) {
+				if (MaxHeap.Capacity != kCapacity) {
+					MaxHeap.Resize(kCapacity);
+				}
+
+				MaxHeap.Clear();
+				MinHeap.Clear();
+			}
+
 			public void Dispose() {
 				MaxHeap.Dispose();
 				MinHeap.Dispose();
@@ -633,13 +644,28 @@ namespace KNN {
 		}
 
 		public void QueryKNearest(float3 queryPosition, NativeSlice<int> result) {
+			var temp = KnnQueryTemp.Create(result.Length);
+			QueryKNearest(queryPosition, result, ref temp);
+			temp.Dispose();
+		}
+
+		/// <summary>
+		/// Same as the overload above, but uses the given temp instead of allocating one, for query loops
+		/// </summary>
+		public void QueryKNearest(float3 queryPosition, NativeSlice<int> result, ref KnnQueryTemp temp) {
 #if ENABLE_UNITY_COLLECTIONS_CHECKS
 			AtomicSafetyHandle.CheckReadAndThrow(m_Safety);
 #endif
-			
-			var temp = KnnQueryTemp.Create(result.Length);
+
 			int k = result.Length;
-			
+
+			// A max heap of capacity 0 reads past its memory on the first push
+			if (k == 0) {
+				return;
+			}
+
+			temp.Clear(k);
+
 			// Biggest Smallest Squared Radius
 			float bssr = float.PositiveInfinity;
 			float3 rootClosestPoint = RootNode.Bounds.ClosestPoint(queryPosition);
@@ -701,11 +727,12 @@ namespace KNN {
 				}
 			}
 			
+			// Ported from bryding/KNN: with fewer points than k, the remaining slots get -1
+			int found = temp.MaxHeap.Count;
+
 			for (int i = 0; i < k; i++) {
-				result[i] = temp.MaxHeap.PopObjMax();
+				result[i] = i < found ? temp.MaxHeap.PopObjMax() : -1;
 			}
-			
-			temp.Dispose();
 		}
 	}
 }

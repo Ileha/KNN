@@ -403,6 +403,57 @@ namespace KNN.Tests
             AssertRangeMatchesLinear(_points[0], radius);
         }
 
+        // bryding/KNN: k above the point count used to read past the heap
+        [Test]
+        public void QueryKNearest_KAbovePointCount_FillsMissingWithMinusOne()
+        {
+            Build(new[] { new float3(0f), new float3(1f), new float3(2f) });
+            var result = new NativeArray<int>(5, Allocator.Temp);
+
+            _knn.QueryKNearest(new float3(0f), result);
+
+            // Farthest first, then the missing slots
+            CollectionAssert.AreEqual(new[] { 2, 1, 0, -1, -1 }, result.ToArray());
+            result.Dispose();
+        }
+
+        // no source: k = 0 used to read past the heap
+        [Test]
+        public void QueryKNearest_KZero_DoesNothing()
+        {
+            Build(new[] { new float3(0f), new float3(1f) });
+            var result = new NativeArray<int>(0, Allocator.Temp);
+
+            Assert.DoesNotThrow(() => _knn.QueryKNearest(new float3(0f), result));
+            result.Dispose();
+        }
+
+        // bryding/KNN: a reused temp resizes to each k and matches a fresh query
+        [Test]
+        public void QueryKNearest_ReusedTemp_MatchesFreshQuery()
+        {
+            int[] ks = { 10, 3, 50, 3, 1 };
+            var random = new Random(Seed);
+            Build(GeneratePoints(ref random, DataSize));
+            var temp = KnnContainer.KnnQueryTemp.Create(1);
+
+            foreach (var k in ks)
+            {
+                var query = random.NextFloat3() * Range;
+                var reused = new NativeArray<int>(k, Allocator.Temp);
+                var fresh = new NativeArray<int>(k, Allocator.Temp);
+
+                _knn.QueryKNearest(query, reused, ref temp);
+                _knn.QueryKNearest(query, fresh);
+
+                CollectionAssert.AreEqual(fresh.ToArray(), reused.ToArray(), $"k {k}");
+                reused.Dispose();
+                fresh.Dispose();
+            }
+
+            temp.Dispose();
+        }
+
         // NearestNeighbors.jl one_point_tree
         [Test]
         public void Query_OnePoint_AlwaysReturnsIt()

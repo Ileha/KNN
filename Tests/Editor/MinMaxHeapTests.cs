@@ -171,5 +171,21 @@ namespace KNN.Tests
             Assert.AreEqual(5f, last.Distance);
             heap.Dispose();
         }
+
+        // bryding/KNN: shrinking used to copy the old capacity into the smaller allocation
+        [Test]
+        public void Resize_Shrink_KeepsCapacityAndClampsCount()
+        {
+            var heap = new MinMaxHeap<int>(64, Allocator.Temp);
+            heap.PushObjMax(0, 1f);
+            heap.PushObjMax(1, 2f);
+            heap.PushObjMax(2, 3f);
+
+            heap.Resize(2);
+
+            Assert.AreEqual(2, heap.Capacity);
+            Assert.AreEqual(2, heap.Count);
+            heap.Dispose();
+        }
     }
 }

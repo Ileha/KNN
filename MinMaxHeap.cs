@@ -57,6 +57,7 @@ namespace KNN.Internal {
 		T HeadKey => keys[1];
 
 		public bool IsFull => Count == m_capacity;
+		public int Capacity => m_capacity;
 
 		Allocator m_allocator;
 		
@@ -92,10 +93,15 @@ namespace KNN.Internal {
 			var newValues = UnsafeUtilityEx.AllocArray<float>(newSize + 1, m_allocator);
 			var newKeys = UnsafeUtilityEx.AllocArray<T>(newSize + 1, m_allocator);
 			
-			// Copy over old arrays
-			UnsafeUtility.MemCpy(newValues, values, (m_capacity + 1) * sizeof(float));
-			UnsafeUtility.MemCpy(newKeys, keys, (m_capacity + 1) * UnsafeUtility.SizeOf<T>());
-			
+			// Copy over old arrays. Ported from bryding/KNN: clamped, so a shrink cannot overrun the smaller allocation
+			int copyCount = (newSize < m_capacity ? newSize : m_capacity) + 1;
+			UnsafeUtility.MemCpy(newValues, values, copyCount * sizeof(float));
+			UnsafeUtility.MemCpy(newKeys, keys, copyCount * UnsafeUtility.SizeOf<T>());
+
+			if (Count > newSize) {
+				Count = newSize;
+			}
+
 			// Get rid of old arrays
 			Dispose();
 
@@ -103,6 +109,10 @@ namespace KNN.Internal {
 			values = newValues;
 			keys = newKeys;
 			m_capacity = newSize;
+		}
+
+		public void Clear() {
+			Count = 0;
 		}
 						
 		// bubble down, MaxHeap version
