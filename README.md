@@ -160,3 +160,14 @@ The demo folder contains 2 demos:
 ## Installation
 
 The project was made as a Unity Package. Just add the git URL to your package manifest and Unity should install it.
+
+## Third-party notices
+
+The tree build and the queries contain code ported from these projects:
+
+- [viliwonka/KDTree](https://github.com/viliwonka/KDTree): range and interval queries, split rule. MIT License, Copyright (c) 2018 Vili Volčini.
+- [scipy](https://github.com/scipy/scipy) (`scipy/spatial/ckdtree`): handling of points that share a coordinate in the build, and taking whole nodes inside the query radius. BSD 3-Clause License.
+
+The unit tests port test cases and data from [ericreg/Supercluster.KDTree](https://github.com/ericreg/Supercluster.KDTree) (MIT), [codeandcats/KdTree](https://github.com/codeandcats/KdTree) (MIT), [viliwonka/KDTree](https://github.com/viliwonka/KDTree) (MIT), [scipy](https://github.com/scipy/scipy) (BSD 3-Clause) and [KristofferC/NearestNeighbors.jl](https://github.com/KristofferC/NearestNeighbors.jl) (MIT).
+
+Full license texts are in [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt).
