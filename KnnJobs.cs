@@ -21,6 +21,12 @@ namespace KNN.Jobs
         public int K;
     }
 
+    public struct IntervalData
+    {
+        public float3 Min;
+        public float3 Max;
+    }
+
     // Top-level and non-generic so Burst can compile them ahead of time in player builds
     [BurstCompile]
     public struct KnnBatchRadiusJob : IJobParallelForBatch
@@ -38,6 +44,36 @@ namespace KNN.Jobs
                 var request = Input[index];
                 hits.Clear();
                 Container.QueryRange(request.Position, request.Radius, hits);
+
+                Output.BeginForEachIndex(index);
+                for (var i = 0; i < hits.Length; i++)
+                {
+                    Output.Write(hits[i]);
+                }
+
+                Output.EndForEachIndex();
+            }
+
+            hits.Dispose();
+        }
+    }
+
+    [BurstCompile]
+    public struct KnnBatchIntervalJob : IJobParallelForBatch
+    {
+        [ReadOnly] public KnnContainer Container;
+        [ReadOnly] public NativeArray<IntervalData> Input;
+        public NativeStream.Writer Output;
+
+        public void Execute(int startIndex, int count)
+        {
+            // One buffer per batch; it keeps its grown capacity across requests
+            var hits = new NativeList<int>(Allocator.Temp);
+            for (var index = startIndex; index < startIndex + count; index++)
+            {
+                var request = Input[index];
+                hits.Clear();
+                Container.QueryInterval(request.Min, request.Max, hits);
 
                 Output.BeginForEachIndex(index);
                 for (var i = 0; i < hits.Length; i++)
