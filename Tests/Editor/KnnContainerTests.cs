@@ -114,22 +114,17 @@ namespace KNN.Tests
         {
             var random = new Random(Seed);
             Build(GeneratePoints(ref random, DataSize));
-            var result = new NativeList<int>(Allocator.TempJob);
 
             for (var i = 0; i < TestDataSize; i++)
             {
                 var min = random.NextFloat3() * Range;
                 var max = min + random.NextFloat3() * Range * 0.2f;
-                result.Clear();
-                new QueryIntervalJob { Container = _knn, Min = min, Max = max, Result = result }.Run();
 
                 var expected = Enumerable.Range(0, _points.Length)
                     .Where(p => math.all(_points[p] >= min & _points[p] <= max))
                     .ToArray();
-                CollectionAssert.AreEquivalent(expected, result.AsArray().ToArray());
+                CollectionAssert.AreEquivalent(expected, QueryInterval(min, max));
             }
-
-            result.Dispose();
         }
 
         // no source: the old interval query searched the sphere around the box, which can miss corners on rounding
@@ -152,12 +147,9 @@ namespace KNN.Tests
             Build(points.ToArray());
             var min = new float3(1f);
             var max = new float3(3f);
-            var result = new NativeList<int>(Allocator.TempJob);
-            new QueryIntervalJob { Container = _knn, Min = min, Max = max, Result = result }.Run();
 
             var expected = Enumerable.Range(0, points.Count).Where(i => math.all(points[i] >= min & points[i] <= max)).ToArray();
-            CollectionAssert.AreEquivalent(expected, result.AsArray().ToArray());
-            result.Dispose();
+            CollectionAssert.AreEquivalent(expected, QueryInterval(min, max));
         }
 
         // viliwonka/KDTree KDTreeQueryTests (Update + Rebuild)
@@ -509,6 +501,16 @@ namespace KNN.Tests
             var result = new NativeArray<int>(k, Allocator.Temp);
             _knn.QueryKNearest(query, result);
             var indices = result.Reverse().ToArray();
+            result.Dispose();
+            return indices;
+        }
+
+        // Unsorted. Runs the job, so the Burst path is tested
+        private int[] QueryInterval(float3 min, float3 max)
+        {
+            var result = new NativeList<int>(Allocator.TempJob);
+            new QueryIntervalJob { Container = _knn, Min = min, Max = max, Result = result }.Run();
+            var indices = result.AsArray().ToArray();
             result.Dispose();
             return indices;
         }

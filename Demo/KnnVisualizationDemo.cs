@@ -53,9 +53,13 @@ public class KnnVisualizationDemo : MonoBehaviour {
 		m_points.Dispose();
 		m_container.Dispose();
 		DisposeResults();
-		m_kNearestInput.Dispose();
-		m_radiusInput.Dispose();
-		m_queryColors.Dispose();
+
+		// Query buffers are created in the first LateUpdate
+		if (m_queryColors.IsCreated) {
+			m_kNearestInput.Dispose();
+			m_radiusInput.Dispose();
+			m_queryColors.Dispose();
+		}
 	}
 
 	// Both query modes write one stream index per probe, so one job colors them

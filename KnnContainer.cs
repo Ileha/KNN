@@ -127,7 +127,9 @@ namespace KNN {
 
 			// Dumb way to create an int* essentially..
 			m_permutation = new NativeList<int>(points.Length, allocator);
-			m_rootNodeIndex = new NativeArray<int>(new[] {-1}, allocator);
+			// Set after allocation: a managed array initializer would allocate garbage
+			m_rootNodeIndex = new NativeArray<int>(1, allocator);
+			m_rootNodeIndex[0] = -1;
 			m_buildQueue = new NativeQueue<int>(allocator);
 
 #if ENABLE_UNITY_COLLECTIONS_CHECKS
