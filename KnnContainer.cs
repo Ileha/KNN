@@ -78,18 +78,19 @@ namespace KNN {
 				KnnQueryTemp temp;
 				temp.MaxHeap = new MinMaxHeap<int>(kCapacity, Allocator.Temp);
 				
-				// Min heap keeps track of current stack.
-				// The max stack depth is the tree depth
-				// The tree depth is log_c(nodes)
-				// Let's assume people have a tree at most 32 deep (which equals 2^32 * c_maxPointsPerLeafNode ~ 2^39 nodes)
-				// There are left/right nodes -> 64 max on stack at any given time
+				// Min heap keeps the nodes still to visit. A wide range query can have hundreds of them,
+				// so PushQueryNode grows it: a full min heap would overwrite its closest node
 				temp.MinHeap = new MinMaxHeap<QueryNode>(64, Allocator.Temp);
 				return temp;
 			}
 
 			public void PushQueryNode(int index, float3 closestPoint, float3 queryPosition) {
 				float lengthsq = math.lengthsq(closestPoint - queryPosition);
-				
+
+				if (MinHeap.IsFull) {
+					MinHeap.Resize(MinHeap.Count * 2);
+				}
+
 				MinHeap.PushObjMin(new QueryNode {
 					NodeIndex = index,
 					TempClosestPoint = closestPoint,
@@ -151,14 +152,21 @@ namespace KNN {
 				int index = m_buildQueue.Dequeue();
 				SplitNode(index, out int posNodeIndex, out int negNodeIndex);
 
-				if (m_nodes[negNodeIndex].Count > c_maxPointsPerLeafNode) {
-					m_buildQueue.Enqueue(posNodeIndex);
-				}
-
-				if (m_nodes[posNodeIndex].Count > c_maxPointsPerLeafNode) {
+				if (ShouldSplit(negNodeIndex)) {
 					m_buildQueue.Enqueue(negNodeIndex);
 				}
+
+				if (ShouldSplit(posNodeIndex)) {
+					m_buildQueue.Enqueue(posNodeIndex);
+				}
 			}
+		}
+
+		bool ShouldSplit(int nodeIndex) {
+			KdNode node = m_nodes[nodeIndex];
+
+			// Zero size bounds hold identical points, which no split can separate
+			return node.Count > c_maxPointsPerLeafNode && math.any(node.Bounds.Size > 0f);
 		}
 
 		public void Dispose() {
@@ -300,7 +308,6 @@ namespace KNN {
 			return b;
 		}
 
-		// TODO: When multiple points overlap exactly this function breaks.
 		/// <summary>
 		/// Recursive splitting procedure
 		/// </summary>
@@ -351,6 +358,15 @@ namespace KNN {
 
 			bounds = parentBounds;
 			bounds.Min = posMin;
+
+			// Every point went right and the pivot sits on the bounds min, so all points share that coordinate.
+			// Flatten the axis, or the next split picks it again and makes no progress
+			if (splittingIndex == parent.Start && splitPivot == boundsStart) {
+				float3 posMax = parentBounds.Max;
+				posMax[splitAxis] = splitPivot;
+				bounds.Max = posMax;
+			}
+
 			posNodeIndex = GetKdNode(bounds, splittingIndex, parent.End);
 
 			parent.NegativeChildIndex = negNodeIndex;

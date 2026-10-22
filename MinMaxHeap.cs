@@ -93,8 +93,8 @@ namespace KNN.Internal {
 			var newKeys = UnsafeUtilityEx.AllocArray<T>(newSize + 1, m_allocator);
 			
 			// Copy over old arrays
-			UnsafeUtility.MemCpy(newValues, values, (m_capacity + 1) * sizeof(int));
-			UnsafeUtility.MemCpy(newKeys, keys, (m_capacity + 1) * sizeof(int));
+			UnsafeUtility.MemCpy(newValues, values, (m_capacity + 1) * sizeof(float));
+			UnsafeUtility.MemCpy(newKeys, keys, (m_capacity + 1) * UnsafeUtility.SizeOf<T>());
 			
 			// Get rid of old arrays
 			Dispose();

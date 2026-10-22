@@ -189,6 +189,44 @@ namespace KNN.Tests
             }
         }
 
+        // no source: a wide query has hundreds of nodes to visit, more than the old fixed min heap of 64
+        [Test]
+        public void QueryRange_LargeRadiusOnLargeCloud_MatchesLinearSearch()
+        {
+            const int count = 200000;
+            const int queries = 3;
+            var random = new Random(Seed);
+            Build(GeneratePoints(ref random, count));
+
+            for (var i = 0; i < queries; i++)
+            {
+                AssertRangeMatchesLinear(random.NextFloat3() * Range, Range * 0.5f);
+            }
+        }
+
+        // no source: points on the bounds edge used to make no progress when split on that axis
+        [Test]
+        public void Build_PointsSharingCoordinate_MatchesLinearSearch()
+        {
+            const int count = 1000;
+            var random = new Random(Seed);
+            var points = new float3[count * 2];
+            for (var i = 0; i < count; i++)
+            {
+                points[i] = new float3(0f, random.NextFloat2());
+                points[count + i] = new float3(10f, random.NextFloat2());
+            }
+
+            Build(points);
+
+            for (var i = 0; i < TestDataSize; i++)
+            {
+                var query = random.NextFloat3(new float3(-1f), new float3(11f, 2f, 2f));
+                AssertKNearestMatchesLinear(query, 10);
+                AssertRangeMatchesLinear(query, 0.2f);
+            }
+        }
+
         // scipy test_kdtree_duplicated_inputs
         [Test]
         public void Build_DuplicatedPoints_QueriesMatchLinearSearch()
@@ -420,9 +458,10 @@ namespace KNN.Tests
             var expected = Enumerable.Range(0, _points.Length)
                 .Where(i => math.lengthsq(_points[i] - query) <= radius * radius)
                 .ToArray();
-            var actual = QueryRange(query, radius);
+            // Sorted AreEqual, because AreEquivalent is quadratic and stalls on large results
+            var actual = QueryRange(query, radius).OrderBy(i => i).ToArray();
 
-            CollectionAssert.AreEquivalent(expected, actual, $"query {query}, radius {radius}");
+            CollectionAssert.AreEqual(expected, actual, $"query {query}, radius {radius}");
         }
 
         private IEnumerable<float> LinearDistances(float3 query)

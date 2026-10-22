@@ -153,5 +153,23 @@ namespace KNN.Tests
             Assert.AreEqual(1, heap.PopObjMax());
             heap.Dispose();
         }
+
+        // no source: Resize used to copy keys as ints, cutting keys bigger than 4 bytes
+        [Test]
+        public void Resize_StructKeys_KeepsPushedItems()
+        {
+            var heap = new MinMaxHeap<QueryNode>(2, Allocator.Temp);
+            heap.PushObjMin(new QueryNode { NodeIndex = 0, Distance = 5f }, 5f);
+            heap.PushObjMin(new QueryNode { NodeIndex = 1, Distance = 1f }, 1f);
+            heap.Resize(4);
+            heap.PushObjMin(new QueryNode { NodeIndex = 2, Distance = 3f }, 3f);
+
+            Assert.AreEqual(1, heap.PopObjMin().NodeIndex);
+            Assert.AreEqual(2, heap.PopObjMin().NodeIndex);
+            var last = heap.PopObjMin();
+            Assert.AreEqual(0, last.NodeIndex);
+            Assert.AreEqual(5f, last.Distance);
+            heap.Dispose();
+        }
     }
 }
