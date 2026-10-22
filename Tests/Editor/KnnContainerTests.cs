@@ -115,7 +115,7 @@ namespace KNN.Tests
                 var min = random.NextFloat3() * Range;
                 var max = min + random.NextFloat3() * Range * 0.2f;
                 result.Clear();
-                new QueryIntervalJob { Container = _knn, Min = min, Max = max, Result = result }.Schedule().Complete();
+                new QueryIntervalJob { Container = _knn, Min = min, Max = max, Result = result }.Run();
 
                 var expected = Enumerable.Range(0, _points.Length)
                     .Where(p => math.all(_points[p] >= min & _points[p] <= max))
