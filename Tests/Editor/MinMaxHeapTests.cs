@@ -16,6 +16,7 @@ namespace KNN.Tests
 
         private static readonly float[] Ages = { 16, 1, 10, 15, 41, 38 };
 
+        // Supercluster.KDTree BoundedPriorityTest.InsertTest
         [Test]
         public void PushObjMax_WhenFull_KeepsSmallestValues()
         {
@@ -31,6 +32,7 @@ namespace KNN.Tests
             heap.Dispose();
         }
 
+        // codeandcats/KdTree NearestNeighbourListTests.TestAddAndCount
         [Test]
         public void PushObjMax_MoreThanCapacity_CountStaysAtCapacity()
         {
@@ -44,6 +46,7 @@ namespace KNN.Tests
             heap.Dispose();
         }
 
+        // codeandcats/KdTree NearestNeighbourListTests.TestRemoveFurtherest
         [Test]
         public void PopObjMax_WhenFull_ReturnsKeptValuesFarthestFirst()
         {
@@ -68,6 +71,7 @@ namespace KNN.Tests
             heap.Dispose();
         }
 
+        // codeandcats/KdTree PriorityQueueTests.TestQueue
         [Test]
         public void PopObjMax_ReturnsDescendingOrder()
         {
@@ -87,6 +91,7 @@ namespace KNN.Tests
             heap.Dispose();
         }
 
+        // no source: min mode used by queries
         [Test]
         public void PopObjMin_ReturnsAscendingOrder()
         {
@@ -106,6 +111,7 @@ namespace KNN.Tests
             heap.Dispose();
         }
 
+        // viliwonka/KDTree HeapTests
         [Test]
         public void PushObjMax_RandomValues_KeepsKSmallest()
         {
@@ -129,6 +135,7 @@ namespace KNN.Tests
             heap.Dispose();
         }
 
+        // no source: Resize used by QueryRange
         [Test]
         public void Resize_KeepsPushedItems()
         {

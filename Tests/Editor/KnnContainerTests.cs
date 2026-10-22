@@ -8,8 +8,9 @@ using Unity.Mathematics;
 
 namespace KNN.Tests
 {
-    // Ported from Supercluster.KDTree (AccuracyTest), codeandcats/KdTree (KdTreeTests)
-    // and viliwonka/KDTree (KDTreeQueryTests, KDTreeQueryResizeTests)
+    // Ported from Supercluster.KDTree (AccuracyTest), codeandcats/KdTree (KdTreeTests),
+    // viliwonka/KDTree (KDTreeQueryTests, KDTreeQueryResizeTests), scipy (test_kdtree.py)
+    // and NearestNeighbors.jl (test_knn.jl, test_inrange.jl)
     public class KnnContainerTests
     {
         private const uint Seed = 12345;
@@ -49,6 +50,7 @@ namespace KNN.Tests
             }
         }
 
+        // codeandcats/KdTree TestGetNearestNeighbours
         [Test]
         public void QueryKNearest_Cities_ReturnsNearestInOrder()
         {
@@ -63,6 +65,7 @@ namespace KNN.Tests
             }
         }
 
+        // codeandcats/KdTree TestRadialSearch
         [Test]
         public void QueryRange_Cities_ReturnsCitiesInRadiusInOrder()
         {
@@ -77,6 +80,7 @@ namespace KNN.Tests
             }
         }
 
+        // Supercluster.KDTree FindNearestNeighborTest
         [Test]
         public void QueryKNearest_RandomPoints_MatchesLinearSearch()
         {
@@ -90,6 +94,7 @@ namespace KNN.Tests
             }
         }
 
+        // Supercluster.KDTree RadialSearchTest
         [Test]
         public void QueryRange_RandomPoints_MatchesLinearSearch()
         {
@@ -103,6 +108,7 @@ namespace KNN.Tests
             }
         }
 
+        // viliwonka/KDTree KDTreeQueryTests (Interval)
         [Test]
         public void QueryInterval_RandomPoints_MatchesLinearSearch()
         {
@@ -126,6 +132,7 @@ namespace KNN.Tests
             result.Dispose();
         }
 
+        // viliwonka/KDTree KDTreeQueryTests (Update + Rebuild)
         [Test]
         public void Rebuild_AfterPointsMove_MatchesLinearSearch()
         {
@@ -152,6 +159,7 @@ namespace KNN.Tests
             }
         }
 
+        // viliwonka/KDTree KDTreeQueryResizeTests
         [Test]
         public void Rebuild_AfterPointsGrow_MatchesLinearSearch()
         {
@@ -181,10 +189,189 @@ namespace KNN.Tests
             }
         }
 
-        private void Build(float3[] points)
+        // scipy test_kdtree_duplicated_inputs
+        [Test]
+        public void Build_DuplicatedPoints_QueriesMatchLinearSearch()
+        {
+            const int count = 1024;
+            var points = new float3[count];
+            for (var i = 0; i < count; i++)
+            {
+                points[i] = i < count / 2 ? new float3(1f) : new float3(2f);
+            }
+
+            Build(points);
+
+            CollectionAssert.AreEquivalent(Enumerable.Range(0, count / 2), QueryRange(new float3(1f), 0.1f));
+            CollectionAssert.AreEquivalent(Enumerable.Range(count / 2, count / 2), QueryRange(new float3(2f), 0.1f));
+            AssertKNearestMatchesLinear(new float3(1f), 600);
+            AssertKNearestMatchesLinear(new float3(1.4f), 600);
+            AssertRangeMatchesLinear(new float3(1.5f), 1f);
+        }
+
+        // scipy test_onetree_query: a tiny cluster, a unit cluster and a shifted cluster
+        [Test]
+        public void Query_ClusteredPoints_MatchesLinearSearch()
+        {
+            const int clusterSize = 2000;
+            const int queriesPerCluster = 30;
+            float[] radii = { 0.1f, 0.001f, 0.00001f, 0.000001f };
+            var random = new Random(Seed);
+            var points = new float3[clusterSize * 3];
+            for (var i = 0; i < clusterSize; i++)
+            {
+                points[i] = random.NextFloat3(-1f, 1f) * 0.001f;
+                points[clusterSize + i] = random.NextFloat3(-1f, 1f) + 2f;
+                points[clusterSize * 2 + i] = random.NextFloat3(-1f, 1f);
+            }
+
+            Build(points);
+
+            for (var cluster = 0; cluster < 3; cluster++)
+            {
+                for (var i = 0; i < queriesPerCluster; i++)
+                {
+                    var query = _points[cluster * clusterSize + i];
+                    AssertKNearestMatchesLinear(query, 10);
+                    foreach (var radius in radii)
+                    {
+                        AssertRangeMatchesLinear(query, radius);
+                    }
+                }
+            }
+        }
+
+        // scipy test_ball_point_ints: the radius bound is inclusive
+        [Test]
+        public void QueryRange_IntegerGrid_IncludesPointsOnRadius()
+        {
+            var points = new float3[16];
+            for (var x = 0; x < 4; x++)
+            {
+                for (var y = 0; y < 4; y++)
+                {
+                    points[x * 4 + y] = new float3(x, y, 0f);
+                }
+            }
+
+            Build(points);
+
+            CollectionAssert.AreEquivalent(new[] { 4, 8, 9, 12 }, QueryRange(new float3(2f, 0f, 0f), 1f));
+        }
+
+        // NearestNeighbors.jl test_inrange: 8 node cube
+        [Test]
+        public void QueryRange_CubeCorners_ReturnsExpected()
+        {
+            Build(new[]
+            {
+                new float3(0, 0, 0), new float3(0, 0, 1), new float3(0, 1, 0), new float3(0, 1, 1),
+                new float3(1, 0, 0), new float3(1, 0, 1), new float3(1, 1, 0), new float3(1, 1, 1),
+            });
+
+            CollectionAssert.AreEquivalent(new[] { 7 }, QueryRange(new float3(1.1f), 0.2f));
+            CollectionAssert.AreEquivalent(new[] { 0, 1 }, QueryRange(new float3(0f, 0f, 0.5f), 0.6f));
+            CollectionAssert.AreEquivalent(new[] { 0 }, QueryRange(new float3(0f), 0.6f));
+            // The original uses 1/3, which puts corner 3 at distance 1 and fails on float rounding
+            CollectionAssert.AreEquivalent(new[] { 0, 1, 2, 4 }, QueryRange(new float3(0.3f), 1f));
+            CollectionAssert.IsEmpty(QueryRange(new float3(0.5f), 0.2f));
+            CollectionAssert.AreEquivalent(Enumerable.Range(0, 8), QueryRange(new float3(0.5f), 1f));
+        }
+
+        // scipy test_len0_arrays
+        [Test]
+        public void QueryRange_RadiusBelowNearestDistance_ReturnsEmpty()
+        {
+            var random = new Random(Seed);
+            Build(GeneratePoints(ref random, DataSize));
+
+            for (var i = 0; i < TestDataSize; i++)
+            {
+                var query = random.NextFloat3() * Range;
+                var nearest = _points[QueryKNearest(query, 1)[0]];
+
+                CollectionAssert.IsEmpty(QueryRange(query, 0.1f * math.distance(nearest, query)));
+            }
+        }
+
+        // scipy test_found_all_outside
+        [Test]
+        public void Query_OutsideCloud_MatchesLinearSearch()
+        {
+            var random = new Random(Seed);
+            Build(GeneratePoints(ref random, DataSize));
+
+            for (var i = 0; i < TestDataSize; i++)
+            {
+                var inside = random.NextFloat3() * Range;
+                foreach (var query in new[] { inside + Range, inside - Range })
+                {
+                    AssertKNearestMatchesLinear(query, 10);
+                    AssertRangeMatchesLinear(query, Range);
+                }
+            }
+        }
+
+        // scipy test_against_logic_error_regression: integer points give many ties and duplicates
+        [Test]
+        public void QueryRange_IntegerPoints_IsSymmetric()
+        {
+            const int count = 2000;
+            const float cells = 10f;
+            const float radius = 3f;
+            var random = new Random(Seed);
+            var points = new float3[count];
+            for (var i = 0; i < count; i++)
+            {
+                points[i] = math.floor(random.NextFloat3() * cells);
+            }
+
+            Build(points);
+
+            var neighbours = Enumerable.Range(0, count).Select(i => new HashSet<int>(QueryRange(_points[i], radius))).ToArray();
+            var asymmetric = Enumerable.Range(0, count)
+                .SelectMany(i => neighbours[i].Where(j => !neighbours[j].Contains(i)).Select(j => (i, j)))
+                .ToArray();
+
+            CollectionAssert.IsEmpty(asymmetric);
+            AssertRangeMatchesLinear(_points[0], radius);
+        }
+
+        // NearestNeighbors.jl one_point_tree
+        [Test]
+        public void Query_OnePoint_AlwaysReturnsIt()
+        {
+            Build(new[] { new float3(0.5f) });
+
+            for (var i = 0; i < 8; i++)
+            {
+                var corner = new float3(i & 1, (i >> 1) & 1, (i >> 2) & 1);
+
+                CollectionAssert.AreEqual(new[] { 0 }, QueryKNearest(corner, 1));
+                CollectionAssert.AreEqual(new[] { 0 }, QueryRange(corner, 1f));
+            }
+        }
+
+        // scipy test_kdtree_build_modes: KNN has one build mode, so compare the deferred build instead
+        [Test]
+        public void KnnRebuildJob_DeferredBuild_MatchesLinearSearch()
+        {
+            var random = new Random(Seed);
+            Build(GeneratePoints(ref random, DataSize), false);
+            new KnnRebuildJob(_knn).Run();
+
+            for (var i = 0; i < TestDataSize; i++)
+            {
+                var query = random.NextFloat3() * Range;
+                AssertKNearestMatchesLinear(query, 10);
+                AssertRangeMatchesLinear(query, 100f);
+            }
+        }
+
+        private void Build(float3[] points, bool buildNow = true)
         {
             _points = new NativeArray<float3>(points, Allocator.Persistent);
-            _knn = new KnnContainer(_points, true, Allocator.Persistent);
+            _knn = new KnnContainer(_points, buildNow, Allocator.Persistent);
             _isBuilt = true;
         }
 
