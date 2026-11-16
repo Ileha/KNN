@@ -123,7 +123,7 @@ namespace KNN.Jobs
         }
     }
 
-    [BurstCompile(CompileSynchronously = true)]
+    [BurstCompile]
     public struct QueryKNearestJob : IJob
     {
         [ReadOnly] private KnnContainer m_container;
@@ -144,7 +144,7 @@ namespace KNN.Jobs
         }
     }
 
-    [BurstCompile(CompileSynchronously = true)]
+    [BurstCompile]
     public struct QueryRangeJob : IJob
     {
         [ReadOnly] private KnnContainer m_container;
@@ -181,7 +181,7 @@ namespace KNN.Jobs
         }
     }
 
-    [BurstCompile(CompileSynchronously = true)]
+    [BurstCompile]
     public struct KnnRebuildJob : IJob
     {
         private KnnContainer m_container;
